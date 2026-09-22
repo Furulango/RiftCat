@@ -1,6 +1,12 @@
-import boto3
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-s3 = boto3.client("s3")
-s3.upload_file("/tmp/prueba.parquet", "riftcat-curated", "match_v5/dt=2026-09-21/prueba.parquet")
-for o in s3.list_objects_v2(Bucket="riftcat-curated", Prefix="match_v5/")["Contents"]:
-    print(o["Key"], o["Size"])
+tabla = pa.table({
+    "match_id": ["LA1_1", "LA1_1", "LA1_1", "LA1_1"],
+    "team_id": [100, 100, 200, 200],
+    "campeon": ["Ahri", "Garen", "Zed", "Lux"],
+    "gano": [True, True, False, False],
+})
+
+pq.write_table(tabla, "/tmp/prueba.parquet")
+print(pq.read_table("/tmp/prueba.parquet").to_pandas())
