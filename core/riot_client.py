@@ -46,3 +46,15 @@ def get_match_ids(puuid, region="americas", queue=420, count=20):
 def get_match_detail(match_id, region="americas"):
     url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{match_id}"
     return get_con_reintento(url)
+
+def get_rank_by_puuid(puuid, platform="la1"):
+    url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+    data = get_con_reintento(url)
+    if not data:
+        return None
+
+    for entrada in data:
+        if entrada["queueType"] == "RANKED_SOLO_5x5":
+            return entrada["tier"]
+
+    return None

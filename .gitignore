@@ -5,6 +5,11 @@ __pycache__/
 *.log
 *.txt
 *.db
+*.json
+
 .env
 
 .vscode/
+
+/docs
+

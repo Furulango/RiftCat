@@ -1,8 +1,8 @@
 import time
 from datetime import datetime
 
-from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail
-from core.db import get_conn, filtrar_nuevos, marcar_visto
+from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail, get_rank_by_puuid
+from core.db import get_conn, filtrar_nuevos, marcar_visto, guardar_puuid, descubrir_puuids
 from core.parquet_writer import armar_registro, guardar_parquet, subir_a_raw
 from core.logger_config import get_logger
 
@@ -12,6 +12,25 @@ ESPERA = 1.2
 TEMP_PATH = "/tmp/riftcat_temp.parquet"
 
 
+def actualizar_rangos_pendientes(conn, limite=20):
+    cursor = conn.execute(
+        "SELECT puuid, region FROM puuids_conocidos WHERE liga IS NULL LIMIT ?",
+        (limite,)
+    )
+    pendientes = cursor.fetchall()
+
+    for puuid, region in pendientes:
+        liga = get_rank_by_puuid(puuid)
+        conn.execute(
+            "UPDATE puuids_conocidos SET liga = ?, fecha_consultado = datetime('now') WHERE puuid = ?",
+            (liga, puuid)
+        )
+        conn.commit()
+        time.sleep(ESPERA)
+
+    return len(pendientes)
+
+
 def run(count_por_jugador=5, limite_puuids=None):
     conn = get_conn()
 
@@ -19,6 +38,12 @@ def run(count_por_jugador=5, limite_puuids=None):
     if limite_puuids:
         puuids = puuids[:limite_puuids]
     logger.info(f"Puuids obtenidos: {len(puuids)}")
+
+    for puuid in puuids:
+        liga = get_rank_by_puuid(puuid)
+        guardar_puuid(conn, puuid, "americas", liga)
+        time.sleep(ESPERA)
+    logger.info(f"Rangos consultados y guardados para {len(puuids)} puuids")
 
     todos_los_ids = set()
     for puuid in puuids:
@@ -42,6 +67,7 @@ def run(count_por_jugador=5, limite_puuids=None):
                 guardar_parquet(registro, TEMP_PATH)
                 subir_a_raw(TEMP_PATH, match_id, fecha)
                 marcar_visto(conn, match_id)
+                descubrir_puuids(conn, detalle, "americas")
                 subidos += 1
                 logger.info(f"[{i}/{len(nuevos)}] Subida OK: {match_id}")
             else:
@@ -51,6 +77,10 @@ def run(count_por_jugador=5, limite_puuids=None):
         time.sleep(ESPERA)
 
     logger.info(f"Partidas subidas a raw: {subidos}")
+
+    actualizados = actualizar_rangos_pendientes(conn, limite=20)
+    logger.info(f"Rangos actualizados (snowball): {actualizados}")
+
     conn.close()
 
 
