@@ -2,6 +2,7 @@ import sqlite3
 
 DB_PATH = "riftcat.db"
 
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -18,6 +19,11 @@ def get_conn():
             fecha_consultado TEXT
         )
     """)
+
+    columnas = [fila[1] for fila in conn.execute("PRAGMA table_info(puuids_conocidos)").fetchall()]
+    if "fecha_ultimo_check" not in columnas:
+        conn.execute("ALTER TABLE puuids_conocidos ADD COLUMN fecha_ultimo_check TEXT")
+
     return conn
 
 
@@ -53,3 +59,21 @@ def descubrir_puuids(conn, detalle, region):
     for puuid in puuids:
         guardar_puuid(conn, puuid, region, None)
 
+def obtener_puuids_para_revisar(conn, limite=20):
+    cursor = conn.execute(
+        """
+        SELECT puuid FROM puuids_conocidos
+        ORDER BY fecha_ultimo_check IS NOT NULL, fecha_ultimo_check ASC
+        LIMIT ?
+        """,
+        (limite,)
+    )
+    return [fila[0] for fila in cursor.fetchall()]
+
+
+def marcar_puuid_revisado(conn, puuid):
+    conn.execute(
+        "UPDATE puuids_conocidos SET fecha_ultimo_check = datetime('now') WHERE puuid = ?",
+        (puuid,)
+    )
+    conn.commit()

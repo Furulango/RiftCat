@@ -2,7 +2,10 @@ import time
 from datetime import datetime
 
 from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail, get_rank_by_puuid
-from core.db import get_conn, filtrar_nuevos, marcar_visto, guardar_puuid, descubrir_puuids
+from core.db import (
+    get_conn, filtrar_nuevos, marcar_visto, guardar_puuid,
+    descubrir_puuids, obtener_puuids_para_revisar, marcar_puuid_revisado
+)
 from core.parquet_writer import armar_registro, guardar_parquet, subir_a_raw
 from core.logger_config import get_logger
 
@@ -31,24 +34,30 @@ def actualizar_rangos_pendientes(conn, limite=20):
     return len(pendientes)
 
 
-def run(count_por_jugador=5, limite_puuids=None):
+def run(count_por_jugador=5, limite_puuids_challenger=None, limite_revision=20):
     conn = get_conn()
 
-    puuids = get_puuids_challenger()
-    if limite_puuids:
-        puuids = puuids[:limite_puuids]
-    logger.info(f"Puuids obtenidos: {len(puuids)}")
+    # 1. Refrescar la semilla de Challenger
+    puuids_challenger = get_puuids_challenger()
+    if limite_puuids_challenger:
+        puuids_challenger = puuids_challenger[:limite_puuids_challenger]
+    logger.info(f"Puuids de Challenger obtenidos: {len(puuids_challenger)}")
 
-    for puuid in puuids:
+    for puuid in puuids_challenger:
         liga = get_rank_by_puuid(puuid)
         guardar_puuid(conn, puuid, "americas", liga)
         time.sleep(ESPERA)
-    logger.info(f"Rangos consultados y guardados para {len(puuids)} puuids")
+    logger.info(f"Rangos consultados y guardados para {len(puuids_challenger)} puuids de Challenger")
+
+    # 2. Traer la cola de revision (rotacion: nunca revisados primero, luego mas antiguos)
+    puuids_a_revisar = obtener_puuids_para_revisar(conn, limite=limite_revision)
+    logger.info(f"Puuids seleccionados para revision esta corrida: {len(puuids_a_revisar)}")
 
     todos_los_ids = set()
-    for puuid in puuids:
+    for puuid in puuids_a_revisar:
         ids = get_match_ids(puuid, count=count_por_jugador)
         todos_los_ids.update(ids)
+        marcar_puuid_revisado(conn, puuid)
         time.sleep(ESPERA)
 
     logger.info(f"Match ids unicos encontrados: {len(todos_los_ids)}")
@@ -85,4 +94,4 @@ def run(count_por_jugador=5, limite_puuids=None):
 
 
 if __name__ == "__main__":
-    run(count_por_jugador=3, limite_puuids=5)
+    run(count_por_jugador=3, limite_puuids_challenger=5, limite_revision=10)
