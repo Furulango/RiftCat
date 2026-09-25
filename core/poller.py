@@ -31,16 +31,25 @@ DIVISIONES = [
     ("RANKED_SOLO_5x5", "PLATINUM", "IV"),
 ]
 
-
 def muestrear_ligas(conn):
     total = 0
+
+    puuids_challenger = get_puuids_challenger()
+    for puuid in puuids_challenger:
+        guardar_puuid(conn, puuid, "americas", "CHALLENGER")
+    total += len(puuids_challenger)
+    logger.info(f"Challenger: {len(puuids_challenger)} puuids")
+
     for platform in SERVIDORES:
         for queue, tier, division in DIVISIONES:
             puuids = get_puuids_by_tier(queue, tier, division, platform=platform)
             for puuid in puuids:
                 guardar_puuid(conn, puuid, platform, tier)
             total += len(puuids)
+            logger.info(f"{platform} {tier} {division}: {len(puuids)} puuids")
             time.sleep(ESPERA)
+
+    logger.info(f"Muestreo de ligas completo: {total} puuids procesados")
     return total
 
 def actualizar_rangos_pendientes(conn, limite=20):
@@ -61,23 +70,9 @@ def actualizar_rangos_pendientes(conn, limite=20):
 
     return len(pendientes)
 
-
-def run(count_por_jugador=5, limite_puuids_challenger=None, limite_revision=20):
+def run(count_por_jugador=5, limite_revision=20):
     conn = get_conn()
 
-    # 1. Refrescar la semilla de Challenger
-    puuids_challenger = get_puuids_challenger()
-    if limite_puuids_challenger:
-        puuids_challenger = puuids_challenger[:limite_puuids_challenger]
-    logger.info(f"Puuids de Challenger obtenidos: {len(puuids_challenger)}")
-
-    for puuid in puuids_challenger:
-        liga = get_rank_by_puuid(puuid)
-        guardar_puuid(conn, puuid, "americas", liga)
-        time.sleep(ESPERA)
-    logger.info(f"Rangos consultados y guardados para {len(puuids_challenger)} puuids de Challenger")
-
-    # 2. Traer la cola de revision (rotacion: nunca revisados primero, luego mas antiguos)
     puuids_a_revisar = obtener_puuids_para_revisar(conn, limite=limite_revision)
     logger.info(f"Puuids seleccionados para revision esta corrida: {len(puuids_a_revisar)}")
 
@@ -120,6 +115,5 @@ def run(count_por_jugador=5, limite_puuids_challenger=None, limite_revision=20):
 
     conn.close()
 
-
 if __name__ == "__main__":
-    run(count_por_jugador=3, limite_puuids_challenger=5, limite_revision=10)
+    run(count_por_jugador=3, limite_revision=10)
