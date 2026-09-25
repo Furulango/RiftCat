@@ -9,8 +9,7 @@ from datetime import datetime
 
 
 def calcular_hash_prefix(match_id):
-    hash_completo = hashlib.md5(match_id.encode()).hexdigest()
-    return hash_completo[:2]
+    return hashlib.md5(match_id.encode()).hexdigest()[:2]
 
 def armar_registro(match_id, detalle):
     return {
@@ -31,7 +30,10 @@ def guardar_parquet(registro, path):
 
     pq.write_table(tabla, path)
 
-def subir_a_raw(path_local, match_id,fecha):
-    hash_match_id = calcular_hash_prefix(match_id)
+def subir_a_raw(path_local, match_id, fecha):
+    platform = match_id.split("_")[0]
+    hash_prefix = calcular_hash_prefix(match_id)
+    key_destino = f"match_v5/platform={platform}/dt={fecha}/h={hash_prefix}/{match_id}.parquet"
+
     s3 = boto3.client("s3")
-    s3.upload_file(path_local, "riftcat-raw", f"match_v5/dt={fecha}/h={hash_match_id}/{match_id}.parquet")
+    s3.upload_file(path_local, "riftcat-raw", key_destino)

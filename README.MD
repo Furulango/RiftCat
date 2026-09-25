@@ -52,3 +52,22 @@ Riot ademas de tocar la base de datos, asi que se dejo en poller.py
 (el orquestador), manteniendo la separacion que ya seguia el resto del
 proyecto: db.py = solo SQLite, riot_client.py = solo HTTP, poller.py =
 junta ambos.
+
+
+**NOTA: el rate limit de Riot es POR SERVIDOR, no global**
+Confirmado experimentalmente (21 sep, luego revalidado): cada plataforma
+(LA1, NA1, EUW1, etc.) tiene su propio contador independiente de rate
+limit. Se probo llamando a LA1, luego NA1, luego LA1 otra vez, y el
+contador de LA1 solo reflejo sus propias 2 llamadas, sin verse afectado
+por la llamada intermedia a NA1 (confirmado via el header
+x-app-rate-limit-count). Esto significa que, en teoria, se podria
+procesar ~15 servidores en paralelo, cada uno a su propia velocidad
+maxima de ~0.83 req/s, sin que se resten entre si.
+
+El poller de hoy (25-09-26) sigue siendo secuencial (un servidor a la vez, dentro
+del mismo programa), asi que NO aprovecha esta independencia todavia:
+aunque agregue datos de varios servidores, los procesa uno tras otro,
+no simultaneamente. Aprovechar esto de verdad requeriria paralelismo
+real (hilos o procesos separados por servidor), lo cual es un cambio de
+arquitectura mayor, identificado como el siguiente salto de performance
+cuando el volumen de datos lo justifique.

@@ -1,7 +1,7 @@
 import time
 from datetime import datetime
 
-from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail, get_rank_by_puuid
+from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail, get_rank_by_puuid, get_puuids_by_tier
 from core.db import (
     get_conn, filtrar_nuevos, marcar_visto, guardar_puuid,
     descubrir_puuids, obtener_puuids_para_revisar, marcar_puuid_revisado
@@ -14,6 +14,34 @@ logger = get_logger(__name__)
 ESPERA = 1.2
 TEMP_PATH = "/tmp/riftcat_temp.parquet"
 
+SERVIDORES = [
+    "br1", "eun1", "euw1", "jp1", "kr",
+    "la1", "la2", "me1", "na1", "oc1",
+    "ru", "sg2", "tr1", "tw2", "vn2",
+]
+
+DIVISIONES = [
+    ("RANKED_SOLO_5x5", "DIAMOND", "I"),
+    ("RANKED_SOLO_5x5", "DIAMOND", "II"),
+    ("RANKED_SOLO_5x5", "DIAMOND", "III"),
+    ("RANKED_SOLO_5x5", "DIAMOND", "IV"),
+    ("RANKED_SOLO_5x5", "PLATINUM", "I"),
+    ("RANKED_SOLO_5x5", "PLATINUM", "II"),
+    ("RANKED_SOLO_5x5", "PLATINUM", "III"),
+    ("RANKED_SOLO_5x5", "PLATINUM", "IV"),
+]
+
+
+def muestrear_ligas(conn):
+    total = 0
+    for platform in SERVIDORES:
+        for queue, tier, division in DIVISIONES:
+            puuids = get_puuids_by_tier(queue, tier, division, platform=platform)
+            for puuid in puuids:
+                guardar_puuid(conn, puuid, platform, tier)
+            total += len(puuids)
+            time.sleep(ESPERA)
+    return total
 
 def actualizar_rangos_pendientes(conn, limite=20):
     cursor = conn.execute(

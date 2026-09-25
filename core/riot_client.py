@@ -58,3 +58,10 @@ def get_rank_by_puuid(puuid, platform="la1"):
             return entrada["tier"]
 
     return None
+
+def get_puuids_by_tier(queue, tier, division, platform="la1"):
+    url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/{queue}/{tier}/{division}"
+    data = get_con_reintento(url)
+    if not data:
+        return []
+    return [entrada["puuid"] for entrada in data]
