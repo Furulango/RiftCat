@@ -62,13 +62,13 @@ def descubrir_puuids(conn, detalle, region):
 def obtener_puuids_para_revisar(conn, limite=20):
     cursor = conn.execute(
         """
-        SELECT puuid FROM puuids_conocidos
+        SELECT puuid, region FROM puuids_conocidos
         ORDER BY fecha_ultimo_check IS NOT NULL, fecha_ultimo_check ASC
         LIMIT ?
         """,
         (limite,)
     )
-    return [fila[0] for fila in cursor.fetchall()]
+    return cursor.fetchall()
 
 
 def marcar_puuid_revisado(conn, puuid):

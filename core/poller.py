@@ -1,7 +1,10 @@
 import time
 from datetime import datetime
 
-from core.riot_client import get_puuids_challenger, get_match_ids, get_match_detail, get_rank_by_puuid, get_puuids_by_tier
+from core.riot_client import (
+    get_puuids_challenger, get_match_ids, get_match_detail,
+    get_rank_by_puuid, get_puuids_by_tier, region_de_plataforma
+)
 from core.db import (
     get_conn, filtrar_nuevos, marcar_visto, guardar_puuid,
     descubrir_puuids, obtener_puuids_para_revisar, marcar_puuid_revisado
@@ -36,7 +39,7 @@ def muestrear_ligas(conn):
 
     puuids_challenger = get_puuids_challenger()
     for puuid in puuids_challenger:
-        guardar_puuid(conn, puuid, "americas", "CHALLENGER")
+        guardar_puuid(conn, puuid, "la1", "CHALLENGER")
     total += len(puuids_challenger)
     logger.info(f"Challenger: {len(puuids_challenger)} puuids")
 
@@ -59,8 +62,8 @@ def actualizar_rangos_pendientes(conn, limite=20):
     )
     pendientes = cursor.fetchall()
 
-    for puuid, region in pendientes:
-        liga = get_rank_by_puuid(puuid)
+    for puuid, platform in pendientes:
+        liga = get_rank_by_puuid(puuid, platform=platform)
         conn.execute(
             "UPDATE puuids_conocidos SET liga = ?, fecha_consultado = datetime('now') WHERE puuid = ?",
             (liga, puuid)
@@ -77,8 +80,9 @@ def run(count_por_jugador=5, limite_revision=20):
     logger.info(f"Puuids seleccionados para revision esta corrida: {len(puuids_a_revisar)}")
 
     todos_los_ids = set()
-    for puuid in puuids_a_revisar:
-        ids = get_match_ids(puuid, count=count_por_jugador)
+    for puuid, platform in puuids_a_revisar:
+        region = region_de_plataforma(platform)
+        ids = get_match_ids(puuid, region=region, count=count_por_jugador)
         todos_los_ids.update(ids)
         marcar_puuid_revisado(conn, puuid)
         time.sleep(ESPERA)
@@ -93,13 +97,15 @@ def run(count_por_jugador=5, limite_revision=20):
 
     for i, match_id in enumerate(nuevos, start=1):
         try:
-            detalle = get_match_detail(match_id)
+            plataforma_match = match_id.split("_")[0].lower()
+            region_match = region_de_plataforma(plataforma_match)
+            detalle = get_match_detail(match_id, region=region_match)
             if detalle:
                 registro = armar_registro(match_id, detalle)
                 guardar_parquet(registro, TEMP_PATH)
                 subir_a_raw(TEMP_PATH, match_id, fecha)
                 marcar_visto(conn, match_id)
-                descubrir_puuids(conn, detalle, "americas")
+                descubrir_puuids(conn, detalle, region_match)
                 subidos += 1
                 logger.info(f"[{i}/{len(nuevos)}] Subida OK: {match_id}")
             else:

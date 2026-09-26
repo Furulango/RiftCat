@@ -7,6 +7,15 @@ API_KEY = os.environ.get("RIOT_API_KEY")
 if not API_KEY:
     raise ValueError("RIOT_API_KEY environment variable is not set.")
 
+RUTEO_REGIONAL = {
+    "na1": "americas", "br1": "americas", "la1": "americas", "la2": "americas", "oc1": "americas",
+    "euw1": "europe", "eun1": "europe", "tr1": "europe", "ru": "europe",
+    "kr": "asia", "jp1": "asia",
+    "sg2": "sea", "tw2": "sea", "vn2": "sea", "me1": "sea",
+}
+
+def region_de_plataforma(platform):
+    return RUTEO_REGIONAL.get(platform, "americas")
 
 def get_con_reintento(url, max_intentos=5):
     headers = {"X-Riot-Token": API_KEY}
