@@ -105,7 +105,7 @@ def run(count_por_jugador=5, limite_revision=20):
                 guardar_parquet(registro, TEMP_PATH)
                 subir_a_raw(TEMP_PATH, match_id, fecha)
                 marcar_visto(conn, match_id)
-                descubrir_puuids(conn, detalle, region_match)
+                descubrir_puuids(conn, detalle, plataforma_match)
                 subidos += 1
                 logger.info(f"[{i}/{len(nuevos)}] Subida OK: {match_id}")
             else:
