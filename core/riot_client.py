@@ -8,10 +8,10 @@ if not API_KEY:
     raise ValueError("RIOT_API_KEY environment variable is not set.")
 
 RUTEO_REGIONAL = {
-    "na1": "americas", "br1": "americas", "la1": "americas", "la2": "americas", "oc1": "americas",
-    "euw1": "europe", "eun1": "europe", "tr1": "europe", "ru": "europe",
+    "na1": "americas", "br1": "americas", "la1": "americas", "la2": "americas",
+    "euw1": "europe", "eun1": "europe", "tr1": "europe", "ru": "europe", "me1": "europe",
     "kr": "asia", "jp1": "asia",
-    "sg2": "sea", "tw2": "sea", "vn2": "sea", "me1": "sea",
+    "sg2": "sea", "tw2": "sea", "vn2": "sea", "oc1": "sea",
 }
 
 def region_de_plataforma(platform):
