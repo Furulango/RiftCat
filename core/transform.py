@@ -54,7 +54,7 @@ def leer_payloads_de_raw():
     """)
 
     resultado = con.execute(
-        "SELECT payload FROM 's3://riftcat-raw/match_v5/*/*/*.parquet'"
+        "SELECT payload FROM 's3://riftcat-raw/match_v5/*/*/*/*.parquet'"
     ).fetchall()
     return [fila[0] for fila in resultado]
 
