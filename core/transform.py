@@ -38,6 +38,7 @@ def cargar_rangos(conn):
 
 def leer_payloads_de_raw():
     con = duckdb.connect()
+    con.execute("SET threads=1")
     con.execute("INSTALL httpfs")
     con.execute("LOAD httpfs")
 
