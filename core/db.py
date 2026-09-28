@@ -19,6 +19,12 @@ def get_conn():
             fecha_consultado TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS matches_en_curated (
+            match_id TEXT PRIMARY KEY,
+            fecha_transformado TEXT
+        )
+    """)
 
     columnas = [fila[1] for fila in conn.execute("PRAGMA table_info(puuids_conocidos)").fetchall()]
     if "fecha_ultimo_check" not in columnas:
@@ -75,5 +81,26 @@ def marcar_puuid_revisado(conn, puuid):
     conn.execute(
         "UPDATE puuids_conocidos SET fecha_ultimo_check = datetime('now') WHERE puuid = ?",
         (puuid,)
+    )
+    conn.commit()
+
+def filtrar_no_transformados(conn, match_ids):
+    
+    if not match_ids:
+        return []
+
+    placeholders = ",".join("?" * len(match_ids))
+    cursor = conn.execute(
+        f"SELECT match_id FROM matches_en_curated WHERE match_id IN ({placeholders})",
+        match_ids
+    )
+    ya_transformados = {fila[0] for fila in cursor.fetchall()}
+    return [m for m in match_ids if m not in ya_transformados]
+
+
+def marcar_transformado(conn, match_id):
+    conn.execute(
+        "INSERT OR IGNORE INTO matches_en_curated (match_id, fecha_transformado) VALUES (?, datetime('now'))",
+        (match_id,)
     )
     conn.commit()

@@ -8,7 +8,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from core.db import get_conn
+from core.db import get_conn, filtrar_no_transformados, marcar_transformado
 
 logger = logging.getLogger("transform")
 logger.setLevel(logging.INFO)
@@ -16,6 +16,11 @@ if not logger.handlers:
     _handler = logging.FileHandler("transform.log")
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     logger.addHandler(_handler)
+
+CURATED_BUCKET = "riftcat-curated"
+CURATED_KEY = "match_v5/curated.parquet"
+TEMP_CURATED_ACTUAL = "/tmp/curated_actual.parquet"
+TEMP_CURATED_NUEVO = "/tmp/curated_completo.parquet"
 
 
 def extraer_filas(detalle):
@@ -46,7 +51,7 @@ def cargar_rangos(conn):
     return {puuid: liga for puuid, liga in cursor.fetchall()}
 
 
-def leer_payloads_de_raw():
+def _conectar_duckdb():
     logger.info("Conectando a duckdb y configurando acceso a S3/MinIO")
     con = duckdb.connect()
     con.execute("SET threads=1")
@@ -64,55 +69,119 @@ def leer_payloads_de_raw():
             USE_SSL false
         )
     """)
+    return con
 
-    logger.info("Contando archivos en raw antes de leer payloads...")
-    total = con.execute(
-        "SELECT count(*) FROM 's3://riftcat-raw/match_v5/*/*/*/*.parquet'"
-    ).fetchone()[0]
-    logger.info(f"Total de archivos en raw: {total}. Iniciando lectura de payloads (puede tardar varios minutos)...")
 
+def listar_match_ids_en_raw(con):
+    """Devuelve el match_id de cada archivo en raw, extrayendolo del nombre
+    del archivo (no abre/lee el contenido de cada payload)."""
+    logger.info("Listando archivos en raw (solo nombres, sin leer contenido)...")
     inicio = time.time()
-    resultado = con.execute(
-        "SELECT payload FROM 's3://riftcat-raw/match_v5/*/*/*/*.parquet'"
-    ).fetchall()
-    duracion = time.time() - inicio
-    logger.info(f"Lectura de payloads terminada en {duracion:.1f} segundos")
+    filas = con.execute("""
+        SELECT filename
+        FROM read_parquet('s3://riftcat-raw/match_v5/*/*/*/*.parquet', filename=true)
+    """).fetchall()
+    logger.info(f"Listado terminado en {time.time() - inicio:.1f}s. Archivos encontrados: {len(filas)}")
+
+    match_ids = []
+    for (ruta,) in filas:
+        nombre_archivo = ruta.rsplit("/", 1)[-1]
+        match_id = nombre_archivo.removesuffix(".parquet")
+        match_ids.append(match_id)
+    return match_ids
+
+
+def leer_payloads_de_raw(con, match_ids_pendientes):
+    """Trae SOLO los payloads de los match_ids pendientes (filtra por nombre
+    de archivo antes de leer el contenido, para no releer lo ya transformado)."""
+    if not match_ids_pendientes:
+        return []
+
+    con.execute("CREATE OR REPLACE TEMP TABLE pendientes (match_id VARCHAR)")
+    con.executemany(
+        "INSERT INTO pendientes VALUES (?)",
+        [(m,) for m in match_ids_pendientes]
+    )
+
+    logger.info(f"Leyendo payloads de {len(match_ids_pendientes)} partidas pendientes...")
+    inicio = time.time()
+    resultado = con.execute("""
+        SELECT payload
+        FROM read_parquet('s3://riftcat-raw/match_v5/*/*/*/*.parquet', filename=true) AS raw
+        JOIN pendientes
+            ON regexp_extract(raw.filename, '([^/]+)\\.parquet$', 1) = pendientes.match_id
+    """).fetchall()
+    logger.info(f"Lectura de payloads pendientes terminada en {time.time() - inicio:.1f}s")
 
     return [fila[0] for fila in resultado]
 
 
+def descargar_curated_existente(s3):
+    """Si ya existe un curated.parquet en S3, lo baja y lo devuelve como
+    tabla de pyarrow. Si no existe todavia (primera corrida), devuelve None."""
+    try:
+        s3.download_file(CURATED_BUCKET, CURATED_KEY, TEMP_CURATED_ACTUAL)
+    except s3.exceptions.ClientError:
+        return None
+    return pq.read_table(TEMP_CURATED_ACTUAL)
+
+
 def run():
-    logger.info("=== Iniciando transform.py ===")
+    logger.info("=== Iniciando transform.py (incremental) ===")
     conn = get_conn()
     rangos = cargar_rangos(conn)
     logger.info(f"Rangos cargados de la DB: {len(rangos)} puuids con liga conocida")
 
-    payloads = leer_payloads_de_raw()
-    logger.info(f"Partidas leidas de raw: {len(payloads)}")
-    print(f"Partidas leidas de raw: {len(payloads)}")
+    con = _conectar_duckdb()
+    s3 = boto3.client("s3")
 
-    todas_las_filas = []
+    todos_los_match_ids = listar_match_ids_en_raw(con)
+    print(f"Match ids totales en raw: {len(todos_los_match_ids)}")
+
+    pendientes = filtrar_no_transformados(conn, todos_los_match_ids)
+    logger.info(f"Match ids pendientes de transformar: {len(pendientes)}")
+    print(f"Match ids pendientes de transformar: {len(pendientes)}")
+
+    if not pendientes:
+        logger.info("Nada nuevo que transformar. Saliendo.")
+        print("Nada nuevo que transformar. Saliendo.")
+        conn.close()
+        return
+
+    payloads = leer_payloads_de_raw(con, pendientes)
+    print(f"Payloads leidos: {len(payloads)}")
+
+    filas_nuevas = []
     for payload in payloads:
         detalle = json.loads(payload)
         filas = extraer_filas(detalle)
         for fila in filas:
             fila["liga"] = rangos.get(fila["puuid"])
-        todas_las_filas.extend(filas)
+        filas_nuevas.extend(filas)
 
-    logger.info(f"Filas totales (jugador-partida): {len(todas_las_filas)}")
-    print(f"Filas totales (jugador-partida): {len(todas_las_filas)}")
+    logger.info(f"Filas nuevas (jugador-partida): {len(filas_nuevas)}")
+    print(f"Filas nuevas (jugador-partida): {len(filas_nuevas)}")
 
-    columnas = {clave: [fila[clave] for fila in todas_las_filas] for clave in todas_las_filas[0].keys()}
-    tabla = pa.table(columnas)
-    pq.write_table(tabla, "/tmp/curated_completo.parquet")
-    logger.info("Parquet local escrito en /tmp/curated_completo.parquet")
+    columnas = {clave: [fila[clave] for fila in filas_nuevas] for clave in filas_nuevas[0].keys()}
+    tabla_nueva = pa.table(columnas)
 
-    s3 = boto3.client("s3")
-    s3.upload_file("/tmp/curated_completo.parquet", "riftcat-curated", "match_v5/curated.parquet")
+    tabla_existente = descargar_curated_existente(s3)
+    if tabla_existente is not None:
+        tabla_final = pa.concat_tables([tabla_existente, tabla_nueva])
+        logger.info(f"Curated existente: {tabla_existente.num_rows} filas. Total tras append: {tabla_final.num_rows} filas.")
+    else:
+        tabla_final = tabla_nueva
+        logger.info(f"No habia curated previo. Filas totales: {tabla_final.num_rows}.")
+
+    pq.write_table(tabla_final, TEMP_CURATED_NUEVO)
+    s3.upload_file(TEMP_CURATED_NUEVO, CURATED_BUCKET, CURATED_KEY)
+
+    for match_id in pendientes:
+        marcar_transformado(conn, match_id)
 
     conn.close()
-    logger.info("=== Subido a curated OK ===")
-    print("Subido a curated OK")
+    logger.info(f"=== Subido a curated OK. {len(pendientes)} partidas nuevas incorporadas. ===")
+    print(f"Subido a curated OK. {len(pendientes)} partidas nuevas incorporadas.")
 
 
 if __name__ == "__main__":
