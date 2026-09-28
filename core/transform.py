@@ -22,6 +22,8 @@ CURATED_KEY = "match_v5/curated.parquet"
 TEMP_CURATED_ACTUAL = "/tmp/curated_actual.parquet"
 TEMP_CURATED_NUEVO = "/tmp/curated_completo.parquet"
 
+TAMANO_LOTE = 1000
+
 
 def extraer_filas(detalle):
     filas = []
@@ -73,8 +75,6 @@ def _conectar_duckdb():
 
 
 def listar_match_ids_en_raw(con):
-    """Devuelve el match_id de cada archivo en raw, extrayendolo del nombre
-    del archivo (no abre/lee el contenido de cada payload)."""
     logger.info("Listando archivos en raw (solo nombres, sin leer contenido)...")
     inicio = time.time()
     filas = con.execute("""
@@ -92,8 +92,6 @@ def listar_match_ids_en_raw(con):
 
 
 def leer_payloads_de_raw(con, match_ids_pendientes):
-    """Trae SOLO los payloads de los match_ids pendientes (filtra por nombre
-    de archivo antes de leer el contenido, para no releer lo ya transformado)."""
     if not match_ids_pendientes:
         return []
 
@@ -103,22 +101,17 @@ def leer_payloads_de_raw(con, match_ids_pendientes):
         [(m,) for m in match_ids_pendientes]
     )
 
-    logger.info(f"Leyendo payloads de {len(match_ids_pendientes)} partidas pendientes...")
-    inicio = time.time()
     resultado = con.execute("""
         SELECT payload
         FROM read_parquet('s3://riftcat-raw/match_v5/*/*/*/*.parquet', filename=true) AS raw
         JOIN pendientes
             ON regexp_extract(raw.filename, '([^/]+)\\.parquet$', 1) = pendientes.match_id
     """).fetchall()
-    logger.info(f"Lectura de payloads pendientes terminada en {time.time() - inicio:.1f}s")
 
     return [fila[0] for fila in resultado]
 
 
 def descargar_curated_existente(s3):
-    """Si ya existe un curated.parquet en S3, lo baja y lo devuelve como
-    tabla de pyarrow. Si no existe todavia (primera corrida), devuelve None."""
     try:
         s3.download_file(CURATED_BUCKET, CURATED_KEY, TEMP_CURATED_ACTUAL)
     except s3.exceptions.ClientError:
@@ -126,8 +119,52 @@ def descargar_curated_existente(s3):
     return pq.read_table(TEMP_CURATED_ACTUAL)
 
 
-def run():
-    logger.info("=== Iniciando transform.py (incremental) ===")
+def _dividir_en_lotes(lista, tamano):
+    for i in range(0, len(lista), tamano):
+        yield lista[i:i + tamano]
+
+
+def procesar_lote(con, s3, conn, rangos, lote_match_ids, numero_lote, total_lotes):
+    logger.info(f"--- Lote {numero_lote}/{total_lotes}: {len(lote_match_ids)} partidas ---")
+    print(f"--- Lote {numero_lote}/{total_lotes}: {len(lote_match_ids)} partidas ---")
+
+    inicio = time.time()
+    payloads = leer_payloads_de_raw(con, lote_match_ids)
+    logger.info(f"Lote {numero_lote}: payloads leidos en {time.time() - inicio:.1f}s")
+
+    filas_nuevas = []
+    for payload in payloads:
+        detalle = json.loads(payload)
+        filas = extraer_filas(detalle)
+        for fila in filas:
+            fila["liga"] = rangos.get(fila["puuid"])
+        filas_nuevas.extend(filas)
+
+    if not filas_nuevas:
+        logger.warning(f"Lote {numero_lote}: no se extrajo ninguna fila, se omite subida")
+        return
+
+    columnas = {clave: [fila[clave] for fila in filas_nuevas] for clave in filas_nuevas[0].keys()}
+    tabla_nueva = pa.table(columnas)
+
+    tabla_existente = descargar_curated_existente(s3)
+    if tabla_existente is not None:
+        tabla_final = pa.concat_tables([tabla_existente, tabla_nueva])
+    else:
+        tabla_final = tabla_nueva
+
+    pq.write_table(tabla_final, TEMP_CURATED_NUEVO)
+    s3.upload_file(TEMP_CURATED_NUEVO, CURATED_BUCKET, CURATED_KEY)
+
+    for match_id in lote_match_ids:
+        marcar_transformado(conn, match_id)
+
+    logger.info(f"Lote {numero_lote}/{total_lotes} OK. Curated ahora tiene {tabla_final.num_rows} filas totales.")
+    print(f"Lote {numero_lote}/{total_lotes} OK. Curated ahora tiene {tabla_final.num_rows} filas totales.")
+
+
+def run(batch_size=TAMANO_LOTE):
+    logger.info(f"=== Iniciando transform.py (incremental, batch_size={batch_size}) ===")
     conn = get_conn()
     rangos = cargar_rangos(conn)
     logger.info(f"Rangos cargados de la DB: {len(rangos)} puuids con liga conocida")
@@ -148,40 +185,17 @@ def run():
         conn.close()
         return
 
-    payloads = leer_payloads_de_raw(con, pendientes)
-    print(f"Payloads leidos: {len(payloads)}")
+    lotes = list(_dividir_en_lotes(pendientes, batch_size))
+    total_lotes = len(lotes)
+    logger.info(f"Se procesaran {len(pendientes)} partidas en {total_lotes} lotes de hasta {batch_size}")
+    print(f"Se procesaran {len(pendientes)} partidas en {total_lotes} lotes de hasta {batch_size}")
 
-    filas_nuevas = []
-    for payload in payloads:
-        detalle = json.loads(payload)
-        filas = extraer_filas(detalle)
-        for fila in filas:
-            fila["liga"] = rangos.get(fila["puuid"])
-        filas_nuevas.extend(filas)
-
-    logger.info(f"Filas nuevas (jugador-partida): {len(filas_nuevas)}")
-    print(f"Filas nuevas (jugador-partida): {len(filas_nuevas)}")
-
-    columnas = {clave: [fila[clave] for fila in filas_nuevas] for clave in filas_nuevas[0].keys()}
-    tabla_nueva = pa.table(columnas)
-
-    tabla_existente = descargar_curated_existente(s3)
-    if tabla_existente is not None:
-        tabla_final = pa.concat_tables([tabla_existente, tabla_nueva])
-        logger.info(f"Curated existente: {tabla_existente.num_rows} filas. Total tras append: {tabla_final.num_rows} filas.")
-    else:
-        tabla_final = tabla_nueva
-        logger.info(f"No habia curated previo. Filas totales: {tabla_final.num_rows}.")
-
-    pq.write_table(tabla_final, TEMP_CURATED_NUEVO)
-    s3.upload_file(TEMP_CURATED_NUEVO, CURATED_BUCKET, CURATED_KEY)
-
-    for match_id in pendientes:
-        marcar_transformado(conn, match_id)
+    for i, lote in enumerate(lotes, start=1):
+        procesar_lote(con, s3, conn, rangos, lote, i, total_lotes)
 
     conn.close()
-    logger.info(f"=== Subido a curated OK. {len(pendientes)} partidas nuevas incorporadas. ===")
-    print(f"Subido a curated OK. {len(pendientes)} partidas nuevas incorporadas.")
+    logger.info(f"=== Todos los lotes completados. {len(pendientes)} partidas incorporadas en total. ===")
+    print(f"Todos los lotes completados. {len(pendientes)} partidas incorporadas en total.")
 
 
 if __name__ == "__main__":
