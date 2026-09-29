@@ -71,3 +71,110 @@ no simultaneamente. Aprovechar esto de verdad requeriria paralelismo
 real (hilos o procesos separados por servidor), lo cual es un cambio de
 arquitectura mayor, identificado como el siguiente salto de performance
 cuando el volumen de datos lo justifique.
+
+**NOTA: correccion, el rate limit es por routing value (y hay dos tipos)**
+Supera a la nota "por que el poller es secuencial". El limite
+(20 req/s, 100 req/2min) se cuenta por routing value, no por app:
+- League-V4 y Summoner-V4 usan ruteo por PLATAFORMA (la1, kr, euw1...):
+  15 contadores independientes.
+- Match-V5 usa ruteo REGIONAL (americas, europe, asia, sea): solo 4
+  contadores. tr1, ru y me1 comparten el de europe, por ejemplo.
+Por eso, para descargar partidas, el maximo paralelismo util es un
+worker por region (4), no uno por servidor. Mas workers en la misma
+region solo se reparten la misma cuota y chocan con el 429.
+Resultado (29-09-26): la fase de subida de ~55K partidas paso de ~26h
+en serie a ~13h con 3 workers (americas, europe, sea). No depende de
+los nucleos del servidor: los workers pasan casi todo el tiempo
+esperando a Riot (~3% de CPU cada uno).
+Los method rate limits del portal (ej. 2000 req/10s en Match-V5) son
+un tope por endpoint; el limite real es el menor entre ese y el de la
+app.
+
+
+**NOTA: cola persistente de match_ids (match_queue)**
+Incidente (28-09-26): un script de dos fases guardaba los match_ids
+descubiertos en un set de Python. La dev key expiro a media fase 2 y
+~62K match_ids quedaron en riesgo: los puuids que los originaron ya
+estaban marcados como revisados, asi que relanzar no los volvia a
+buscar. Se recuperaron redescubriendo los puuids por su
+fecha_ultimo_check del dia de la corrida.
+Solucion: tabla match_queue en SQLite (match_id, plataforma,
+puuid_origen, estado, intentos, ultimo_error). La fase 1 escribe ahi en
+vez de memoria; la fase 2 lee WHERE estado = 'pendiente'. Si el proceso
+muere, se relanza el mismo comando y sigue donde iba. Tambien es la base
+de los workers por region. Los scripts se detienen solos ante un
+401/403 en vez de seguir quemando la lista.
+
+
+**NOTA: transform leia todo raw en cada lote**
+El transform ya era incremental en QUE procesar (matches_en_curated),
+pero no en QUE LEER: para sacar los 1000 payloads de un lote, la query
+hacia read_parquet sobre todo raw y filtraba con un JOIN. DuckDB tenia
+que abrir los ~127K archivos por HTTP en cada lote. Con 91K archivos y
+MinIO sin carga se notaba poco; con 127K y workers escribiendo, el
+primer lote llevaba 40 min sin terminar de leer.
+Fix (29-09-26): el listado inicial ya trae la ruta completa de cada
+archivo; se guarda en un dict match_id -> ruta y cada lote hace
+read_parquet([rutas del lote]). Lectura de 1000 payloads: 3.2s. Lote
+completo: ~10s. 42 lotes: ~8 min en vez de mas de un dia (~200x).
+
+
+**NOTA: marcar como transformado solo lo que si se leyo**
+Bug: procesar_lote marcaba en matches_en_curated todos los match_ids
+del lote aunque su payload no se hubiera leido. Si un archivo fallaba,
+la partida quedaba marcada y nunca se reintentaba (10 partidas perdidas
+en la primera corrida: 79022 marcadas vs 79012 en curated).
+Fix: solo se marcan los match_ids que produjeron filas; los faltantes
+se reportan en el log y se reintentan en la siguiente corrida.
+
+
+**NOTA: SET threads=1 en DuckDB**
+IOException ("Failure when receiving data from the peer") al leer raw
+desde MinIO. No era un archivo corrupto (boto3 descargaba el mismo
+archivo sin problema). Causa: DuckDB abre muchas conexiones HTTP en
+paralelo y MinIO en un servidor con pocos recursos las cortaba. Con
+threads=1 la lectura es estable. Revisar este valor al migrar a S3 real,
+donde el paralelismo si deberia ayudar.
+
+
+**NOTA: servidores estancados en el snowball**
+Riot no hace matchmaking entre regiones, asi que el snowball solo crece
+dentro del servidor donde se sembro. Ademas, la cola de revision
+(ORDER BY fecha_ultimo_check IS NOT NULL, fecha_ultimo_check) deja los
+NULL empatados en orden de rowid, o sea, orden de insercion. Resultado:
+9 servidores (na1, tr1, ru, vn2, tw2, sg2, oc1, me1, la2) llevaban dias
+con ~1-2K partidas contra ~16K de los primeros sembrados, y a ese ritmo
+hubieran tardado cientos de horas en avanzar.
+Solucion: corrida dirigida a los puuids pendientes de esos 9 servidores.
+Resultado: ~8K partidas cada uno. Pendiente: la1 sigue en ~1.5K.
+
+
+**NOTA: balancear la ingesta vs ponderar en el analisis**
+Aun despues de la corrida dirigida, 5 servidores (euw1, kr, eun1, br1,
+jp1) tienen ~la mitad del dataset, y la muestra no es proporcional a la
+poblacion real (jp1 pesa casi como kr). En vez de perseguir un balance
+perfecto en la ingesta, las estadisticas globales se ponderan por
+servidor (post-estratificacion): peso igual si cada region debe contar
+lo mismo, peso por poblacion si se quiere representar al jugador
+promedio. Las corridas dirigidas se usan solo para que ningun servidor
+quede con muy poca muestra.
+
+
+**NOTA: liga conocida solo para jugadores sembrados**
+Solo los puuids sembrados desde League-V4 tienen liga; los descubiertos
+por snowball quedan en NULL (la mayoria de curated). Los analisis por
+liga usan solo esa submuestra, y cada jugador sembrado aparece ~5 veces,
+asi que las partidas no son independientes: los intervalos de confianza
+calculados por partida son optimistas. Pendiente: snapshot de rango
+para los participantes (League-V4 by-puuid) y champion-mastery-v4 para
+detectar OTPs de verdad.
+Detalle: el log "Rangos cargados: N puuids con liga conocida" cuenta
+todos los puuids, incluidos los NULL. Corregir el mensaje.
+
+
+**NOTA: Personal API Key**
+La dev key expira cada 24h y fue la causa de varios cortes. Desde el
+28-09-26 se usa una Personal API Key (aprobada al registrar el producto
+en el portal): mismos limites, sin expiracion. No se deben usar varias
+keys a la vez para rebasar los limites (va contra las politicas de Riot).
+La key vive solo en riftcat-env.sh, nunca en el repo.
