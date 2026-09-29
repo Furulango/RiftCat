@@ -24,6 +24,22 @@ TEMP_CURATED_NUEVO = "/tmp/curated_completo.parquet"
 
 TAMANO_LOTE = 1000
 
+SCHEMA_CURATED = pa.schema([
+    ("match_id", pa.string()),
+    ("puuid", pa.string()),
+    ("team_id", pa.int64()),
+    ("champion_name", pa.string()),
+    ("team_position", pa.string()),
+    ("win", pa.bool_()),
+    ("kills", pa.int64()),
+    ("deaths", pa.int64()),
+    ("assists", pa.int64()),
+    ("gold_earned", pa.int64()),
+    ("total_damage_to_champions", pa.int64()),
+    ("vision_score", pa.int64()),
+    ("liga", pa.string()),
+])
+
 
 def extraer_filas(detalle):
     filas = []
@@ -138,12 +154,14 @@ def procesar_lote(con, s3, conn, rangos, lote_match_ids, rutas_lote, numero_lote
     if faltantes:
         logger.warning(f"Lote {numero_lote}: {faltantes} partidas no se pudieron leer, se reintentaran en la siguiente corrida")
 
-    columnas = {clave: [fila[clave] for fila in filas_nuevas] for clave in filas_nuevas[0].keys()}
-    tabla_nueva = pa.table(columnas)
+    tabla_nueva = pa.Table.from_pylist(filas_nuevas, schema=SCHEMA_CURATED)
 
     tabla_existente = descargar_curated_existente(s3)
-    tabla_final = pa.concat_tables([tabla_existente, tabla_nueva]) if tabla_existente is not None else tabla_nueva
-
+    if tabla_existente is not None:
+        tabla_final = pa.concat_tables([tabla_existente.cast(SCHEMA_CURATED), tabla_nueva])
+    else:
+        tabla_final = tabla_nueva
+        
     pq.write_table(tabla_final, TEMP_CURATED_NUEVO)
     s3.upload_file(TEMP_CURATED_NUEVO, CURATED_BUCKET, CURATED_KEY)
 
