@@ -46,6 +46,7 @@ erDiagram
   MATCHES_VISTOS {
     text match_id PK
     text fecha_procesado
+    text s3_key "ruta exacta en raw"
   }
   MATCHES_EN_CURATED {
     text match_id PK
@@ -87,6 +88,10 @@ descubrir match_ids -> match_queue -> worker por region -> raw -> transform por 
 ```
 
 Notas:
+- SQLite es la fuente de verdad: `matches_vistos.s3_key` guarda la ruta
+  exacta de cada archivo, asi el transform no lista raw.
+  `python -m core.mantenimiento reconciliar` verifica que coincida con el
+  bucket.
 - `match_queue` evita perder match_ids si un proceso muere a medias (ver
   la nota del README sobre la cola persistente). Cada worker toma solo
   las plataformas de su region de ruteo.
@@ -355,8 +360,10 @@ porque la muestra no es proporcional a la poblacion real.
 - [x] Rangos pendientes ya no se atoran (UNRANKED, orden por antiguedad)
 - [x] Tests de `riot_client` y de rangos
 - [ ] Datos cerrados: sea terminado, transform final, curated = matches_vistos
-- [ ] `match_queue` en `core/db.py` con funciones y `busy_timeout`
+- [x] `match_queue` en `core/db.py` con funciones y `busy_timeout`
+- [x] `s3_key` en `matches_vistos`: el transform ya no lista raw
+- [x] `core/mantenimiento.py`: rellenar-keys y reconciliar
 - [ ] Poller en dos comandos: `descubrir` (encola) y `worker --region` (consume)
-- [ ] Tests de la cola
+- [x] Tests de la cola, del estado y del transform
 - [ ] README: que es, como correrlo, diagrama, tabla local <-> AWS
 - [ ] Borrar `worker_region.py` de B

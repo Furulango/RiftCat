@@ -8,7 +8,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from core.db import get_conn, filtrar_no_transformados, marcar_transformado
+from core.db import get_conn, marcar_transformado, pendientes_de_transformar
 
 logger = logging.getLogger("transform")
 logger.setLevel(logging.INFO)
@@ -90,28 +90,28 @@ def _conectar_duckdb():
     return con
 
 
-def listar_archivos_en_raw(con):
-    logger.info("Listando archivos en raw (solo nombres, sin leer contenido)...")
-    inicio = time.time()
-    filas = con.execute("""
-        SELECT DISTINCT filename
-        FROM read_parquet('s3://riftcat-raw/match_v5/*/*/*/*.parquet', filename=true)
-    """).fetchall()
-    logger.info(f"Listado terminado en {time.time() - inicio:.1f}s. Archivos encontrados: {len(filas)}")
+RAW_BUCKET = "riftcat-raw"
 
+
+def obtener_rutas_pendientes(conn):
+    """Lo que falta transformar, segun SQLite. No lista raw: la ruta exacta se guardo al subir.
+    Devuelve ({match_id: ruta s3}, [match_ids sin s3_key])."""
     rutas = {}
-    for (ruta,) in filas:
-        match_id = ruta.rsplit("/", 1)[-1].removesuffix(".parquet")
-        rutas[match_id] = ruta
-    return rutas
+    sin_key = []
+    for match_id, s3_key in pendientes_de_transformar(conn):
+        if s3_key:
+            rutas[match_id] = f"s3://{RAW_BUCKET}/{s3_key}"
+        else:
+            sin_key.append(match_id)
+    return rutas, sin_key
 
 
 def leer_payloads_de_raw(con, rutas):
     if not rutas:
         return []
     lista = ", ".join("'" + r.replace("'", "''") + "'" for r in rutas)
-    resultado = con.execute(f"SELECT payload FROM read_parquet([{lista}])").fetchall()
-    return [fila[0] for fila in resultado]
+    resultado = con.execute(f"SELECT filename, payload FROM read_parquet([{lista}], filename=true)").fetchall()
+    return [(ruta.rsplit("/", 1)[-1].removesuffix(".parquet"), payload) for ruta, payload in resultado]
 
 
 
@@ -137,22 +137,32 @@ def procesar_lote(con, s3, conn, rangos, lote_match_ids, rutas_lote, numero_lote
 
     filas_nuevas = []
     procesados = set()
-    for payload in payloads:
+    vacios = set()
+    for match_id, payload in payloads:
         detalle = json.loads(payload)
         filas = extraer_filas(detalle)
+        if not filas:
+            vacios.add(match_id)
+            continue
         for fila in filas:
             fila["liga"] = rangos.get(fila["puuid"])
         filas_nuevas.extend(filas)
-        if filas:
-            procesados.add(filas[0]["match_id"])
+        procesados.add(match_id)
+
+    # Partidas que Riot devolvio sin participantes: no aportan filas, pero se marcan
+    # para que no se reintenten en cada corrida.
+    for match_id in vacios:
+        marcar_transformado(conn, match_id)
+    if vacios:
+        logger.warning(f"Lote {numero_lote}: {len(vacios)} partidas sin participantes, marcadas y omitidas: {sorted(vacios)}")
+
+    faltantes = len(lote_match_ids) - len(procesados) - len(vacios)
+    if faltantes:
+        logger.warning(f"Lote {numero_lote}: {faltantes} partidas no se pudieron leer, se reintentaran en la siguiente corrida")
 
     if not filas_nuevas:
         logger.warning(f"Lote {numero_lote}: no se extrajo ninguna fila, se omite subida")
-        return
-
-    faltantes = len(lote_match_ids) - len(procesados)
-    if faltantes:
-        logger.warning(f"Lote {numero_lote}: {faltantes} partidas no se pudieron leer, se reintentaran en la siguiente corrida")
+        return 0
 
     tabla_nueva = pa.Table.from_pylist(filas_nuevas, schema=SCHEMA_CURATED)
 
@@ -169,19 +179,25 @@ def procesar_lote(con, s3, conn, rangos, lote_match_ids, rutas_lote, numero_lote
         marcar_transformado(conn, match_id)
 
     logger.info(f"Lote {numero_lote}/{total_lotes} OK. Curated ahora tiene {tabla_final.num_rows} filas totales.")
+    return len(procesados)
 
 
 def run(batch_size=TAMANO_LOTE):
     logger.info(f"=== Iniciando transform.py (incremental, batch_size={batch_size}) ===")
     conn = get_conn()
     rangos = cargar_rangos(conn)
-    logger.info(f"Rangos cargados de la DB: {len(rangos)} puuids con liga conocida")
+    logger.info(f"Rangos cargados de la DB: {sum(1 for v in rangos.values() if v)} puuids con liga conocida")
 
     con = _conectar_duckdb()
     s3 = boto3.client("s3")
 
-    rutas = listar_archivos_en_raw(con)
-    pendientes = filtrar_no_transformados(conn, list(rutas.keys()))
+    rutas, sin_key = obtener_rutas_pendientes(conn)
+    if sin_key:
+        logger.warning(
+            f"{len(sin_key)} partidas en raw sin s3_key registrada; se omiten. "
+            "Corre: python -m core.mantenimiento rellenar-keys"
+        )
+    pendientes = list(rutas.keys())
     logger.info(f"Match ids pendientes de transformar: {len(pendientes)}")
 
     if not pendientes:
@@ -193,13 +209,14 @@ def run(batch_size=TAMANO_LOTE):
     total_lotes = len(lotes)
     logger.info(f"Se procesaran {len(pendientes)} partidas en {total_lotes} lotes de hasta {batch_size}")
 
+    incorporadas = 0
     for i, lote in enumerate(lotes, start=1):
         rutas_lote = [rutas[m] for m in lote]
-        procesar_lote(con, s3, conn, rangos, lote, rutas_lote, i, total_lotes)
+        incorporadas += procesar_lote(con, s3, conn, rangos, lote, rutas_lote, i, total_lotes)
 
     conn.close()
-    logger.info(f"=== Todos los lotes completados. {len(pendientes)} partidas incorporadas en total. ===")
-    print(f"Todos los lotes completados. {len(pendientes)} partidas incorporadas en total.")
+    logger.info(f"=== Todos los lotes completados. {incorporadas} partidas incorporadas a curated. ===")
+    print(f"Todos los lotes completados. {incorporadas} partidas incorporadas a curated.")
 
 
 if __name__ == "__main__":

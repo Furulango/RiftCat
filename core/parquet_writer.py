@@ -37,3 +37,4 @@ def subir_a_raw(path_local, match_id, fecha):
 
     s3 = boto3.client("s3")
     s3.upload_file(path_local, "riftcat-raw", key_destino)
+    return key_destino

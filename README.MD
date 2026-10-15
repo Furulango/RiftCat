@@ -150,3 +150,25 @@ La dev key expira cada 24h y fue la causa de varios cortes. Desde el
 en el portal): mismos limites, sin expiracion. No se deben usar varias
 keys a la vez para rebasar los limites (va contra las politicas de Riot).
 La key vive solo en riftcat-env.sh, nunca en el repo.
+
+
+**NOTA: SQLite es la fuente de verdad, raw no se lista**
+Hasta el 15-10-26 el transform listaba todo raw en cada corrida para saber
+que habia de nuevo: con 147K archivos tardaba ~6 min, porque DuckDB abria
+cada archivo para leer su metadata. Ahora quien escribe registra lo que
+escribio: subir_a_raw devuelve la key exacta y marcar_visto la guarda en
+matches_vistos.s3_key. El transform sale de SQLite (matches_vistos menos
+matches_en_curated) con rutas exactas, sin listar nada, asi que cada
+corrida cuesta lo mismo con 150K archivos que con millones.
+Para confirmar que SQLite y el bucket siguen coincidiendo existe
+python -m core.mantenimiento reconciliar (usa ListObjects de S3: paginas
+de 1000 nombres, sin abrir archivos). Las partidas viejas sin key se
+llenaron una vez con python -m core.mantenimiento rellenar-keys.
+En AWS el equivalente es S3 Event Notifications hacia SQS, y para curated
+un formato de tabla (Iceberg) que lleve su propio registro de archivos.
+
+
+**NOTA: partidas sin participantes**
+13 partidas en raw llegaron de Riot con info.participants vacio. No
+aportan filas a curated; el transform las marca como transformadas y las
+reporta en el log para que no se reintenten en cada corrida.
