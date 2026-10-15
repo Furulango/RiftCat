@@ -3,7 +3,8 @@ from datetime import datetime
 
 from core.riot_client import (
     get_puuids_challenger, get_match_ids, get_match_detail,
-    get_rank_by_puuid, get_puuids_by_tier, region_de_plataforma
+    get_rank_by_puuid, get_puuids_by_tier, region_de_plataforma,
+    KeyInvalidaError, RiotError,
 )
 from core.db import (
     get_conn, filtrar_nuevos, marcar_visto, guardar_puuid,
@@ -28,6 +29,10 @@ DIVISIONES = [
     ("RANKED_SOLO_5x5", "DIAMOND", "II"),
     ("RANKED_SOLO_5x5", "DIAMOND", "III"),
     ("RANKED_SOLO_5x5", "DIAMOND", "IV"),
+    ("RANKED_SOLO_5x5", "EMERALD", "I"),
+    ("RANKED_SOLO_5x5", "EMERALD", "II"),
+    ("RANKED_SOLO_5x5", "EMERALD", "III"),
+    ("RANKED_SOLO_5x5", "EMERALD", "IV"),
     ("RANKED_SOLO_5x5", "PLATINUM", "I"),
     ("RANKED_SOLO_5x5", "PLATINUM", "II"),
     ("RANKED_SOLO_5x5", "PLATINUM", "III"),
@@ -55,23 +60,45 @@ def muestrear_ligas(conn):
     logger.info(f"Muestreo de ligas completo: {total} puuids procesados")
     return total
 
+SIN_RANGO = "UNRANKED"
+
+
 def actualizar_rangos_pendientes(conn, limite=20):
+    """Consulta el rango de puuids sin liga, empezando por los consultados hace mas tiempo.
+    Si el jugador no tiene rango en solo/duo se guarda UNRANKED, para que no vuelva
+    a salir en cada corrida."""
     cursor = conn.execute(
-        "SELECT puuid, region FROM puuids_conocidos WHERE liga IS NULL LIMIT ?",
+        """
+        SELECT puuid, region FROM puuids_conocidos
+        WHERE liga IS NULL
+        ORDER BY fecha_consultado ASC
+        LIMIT ?
+        """,
         (limite,)
     )
     pendientes = cursor.fetchall()
 
+    actualizados = 0
     for puuid, platform in pendientes:
-        liga = get_rank_by_puuid(puuid, platform=platform)
-        conn.execute(
-            "UPDATE puuids_conocidos SET liga = ?, fecha_consultado = datetime('now') WHERE puuid = ?",
-            (liga, puuid)
-        )
+        try:
+            liga = get_rank_by_puuid(puuid, platform=platform) or SIN_RANGO
+            conn.execute(
+                "UPDATE puuids_conocidos SET liga = ?, fecha_consultado = datetime('now') WHERE puuid = ?",
+                (liga, puuid)
+            )
+            actualizados += 1
+        except KeyInvalidaError:
+            raise
+        except (RiotError, ValueError) as e:
+            logger.error(f"No se pudo consultar el rango de {puuid} ({platform}): {e}")
+            conn.execute(
+                "UPDATE puuids_conocidos SET fecha_consultado = datetime('now') WHERE puuid = ?",
+                (puuid,)
+            )
         conn.commit()
         time.sleep(ESPERA)
 
-    return len(pendientes)
+    return actualizados
 
 def run(count_por_jugador=5, limite_revision=20):
     conn = get_conn()
@@ -110,6 +137,9 @@ def run(count_por_jugador=5, limite_revision=20):
                 logger.info(f"[{i}/{len(nuevos)}] Subida OK: {match_id}")
             else:
                 logger.warning(f"[{i}/{len(nuevos)}] Sin detalle (404): {match_id}")
+        except KeyInvalidaError:
+            logger.error("Key invalida o expirada. Deteniendo el poller.")
+            raise
         except Exception as e:
             logger.error(f"[{i}/{len(nuevos)}] Fallo procesando {match_id}: {e}")
         time.sleep(ESPERA)

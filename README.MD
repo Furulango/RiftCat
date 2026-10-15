@@ -1,15 +1,3 @@
-**ADD KITTYMETALOL in the future
-
-**NOTA: por que el poller es secuencial y no paralelo**
-El rate limit de Riot (~0.8 req/s) es compartido por toda la app, sin
-importar cuantos hilos hagan las llamadas. Paralelizar no aumenta el
-throughput real, solo choca con el 429 mas rapido. El paralelismo si
-tendria sentido en las partes que no dependen de Riot (empaquetar/subir
-a S3 en paralelo), pero el cuello de botella esta en la descarga, no en
-el procesamiento local. Escalar el volumen es cosa de tiempo (correr el
-poller de forma continua via cron/EventBridge), no de mas keys o hilos.
-
-
 **NOTA: por que el particionado por hash, aunque se vea "vacio" ahorita**
 Con pocas partidas, el hash de 2 digitos (256 combinaciones posibles)
 genera casi una carpeta por archivo, lo cual se ve raro navegando MinIO
@@ -54,27 +42,11 @@ proyecto: db.py = solo SQLite, riot_client.py = solo HTTP, poller.py =
 junta ambos.
 
 
-**NOTA: el rate limit de Riot es POR SERVIDOR, no global**
-Confirmado experimentalmente (21 sep, luego revalidado): cada plataforma
-(LA1, NA1, EUW1, etc.) tiene su propio contador independiente de rate
-limit. Se probo llamando a LA1, luego NA1, luego LA1 otra vez, y el
-contador de LA1 solo reflejo sus propias 2 llamadas, sin verse afectado
-por la llamada intermedia a NA1 (confirmado via el header
-x-app-rate-limit-count). Esto significa que, en teoria, se podria
-procesar ~15 servidores en paralelo, cada uno a su propia velocidad
-maxima de ~0.83 req/s, sin que se resten entre si.
-
-El poller de hoy (25-09-26) sigue siendo secuencial (un servidor a la vez, dentro
-del mismo programa), asi que NO aprovecha esta independencia todavia:
-aunque agregue datos de varios servidores, los procesa uno tras otro,
-no simultaneamente. Aprovechar esto de verdad requeriria paralelismo
-real (hilos o procesos separados por servidor), lo cual es un cambio de
-arquitectura mayor, identificado como el siguiente salto de performance
-cuando el volumen de datos lo justifique.
-
-**NOTA: correccion, el rate limit es por routing value (y hay dos tipos)**
-Supera a la nota "por que el poller es secuencial". El limite
-(20 req/s, 100 req/2min) se cuenta por routing value, no por app:
+**NOTA: el rate limit es por routing value (y hay dos tipos)**
+El limite (20 req/s, 100 req/2min) se cuenta por routing value, no por
+app. Primero se confirmo con el header x-app-rate-limit-count (21-09-26:
+llamar a LA1, NA1 y LA1 otra vez; el contador de LA1 solo vio sus 2
+llamadas). Despues (29-09-26) se vio que hay dos tipos de ruteo:
 - League-V4 y Summoner-V4 usan ruteo por PLATAFORMA (la1, kr, euw1...):
   15 contadores independientes.
 - Match-V5 usa ruteo REGIONAL (americas, europe, asia, sea): solo 4

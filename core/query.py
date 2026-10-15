@@ -1,7 +1,11 @@
+"""Consulta rapida de ejemplo sobre curated: campeones mas jugados y su winrate.
+Uso: python -m core.query"""
 import os
+
 import duckdb
 
 con = duckdb.connect()
+con.execute("SET threads=1")
 con.execute("INSTALL httpfs")
 con.execute("LOAD httpfs")
 
@@ -17,9 +21,15 @@ con.execute(f"""
     )
 """)
 
-print(con.execute("""
-    SELECT campeon, COUNT(*) AS partidas
-    FROM 's3://riftcat-curated/match_v5/*/*.parquet'
-    GROUP BY campeon
+filas = con.execute("""
+    SELECT champion_name,
+           count(*) AS partidas,
+           round(100.0 * avg(win::INT), 1) AS winrate
+    FROM 's3://riftcat-curated/match_v5/curated.parquet'
+    GROUP BY champion_name
     ORDER BY partidas DESC
-""").fetchall())
+    LIMIT 20
+""").fetchall()
+
+for campeon, partidas, winrate in filas:
+    print(f"{campeon:<15}{partidas:>8}{winrate:>7}%")
