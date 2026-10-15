@@ -1,3 +1,135 @@
+# RiftCat
+
+Pipeline de datos de League of Legends: descarga partidas rankeadas de la
+API de Riot, las guarda en un data lake (raw), las transforma a una tabla
+analitica (curated) y permite consultarlas con SQL. Corre hoy en local
+(MinIO + SQLite + DuckDB) con el mismo diseno que tendra en AWS
+(S3 + DynamoDB + Athena), y es la base para una capa de ML de prediccion
+de victoria con reentrenamiento por parche.
+
+Proyecto personal de portafolio y de investigacion. Usa una Personal API
+Key de Riot; los datos crudos no se redistribuyen.
+
+## Estado
+
+Version 0 local, nivel 1 del modelo de datos (octubre 2026):
+
+| | |
+|---|---|
+| Partidas en raw | 147,783 (15 servidores, Platino a Challenger) |
+| Partidas en curated | 147,770 (1.48M filas jugador-partida) |
+| Consistencia SQLite vs raw | 100% (`python -m core.mantenimiento reconciliar`) |
+| Tests | 46 con pytest |
+
+Siguiente: migracion a AWS con Terraform (V1) y capa de ML (V2). Detalle
+en [ESTADO_FASES.md](ESTADO_FASES.md) y en
+[MODELO_DE_DATOS.md](MODELO_DE_DATOS.md).
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+    API[API de Riot<br/>League-V4 / Match-V5]
+    subgraph ingesta [core/poller.py]
+        D[descubrir] --> Q[(match_queue<br/>SQLite)]
+        Q --> W1[worker americas]
+        Q --> W2[worker europe]
+        Q --> W3[worker asia]
+        Q --> W4[worker sea]
+    end
+    API --> D
+    API --> W1 & W2 & W3 & W4
+    W1 & W2 & W3 & W4 --> RAW[(raw<br/>un parquet por partida)]
+    W1 & W2 & W3 & W4 --> ST[(estado SQLite<br/>matches_vistos con s3_key)]
+    ST --> T[core/transform.py<br/>incremental por lotes]
+    RAW --> T
+    T --> CUR[(curated<br/>parquet)]
+    CUR --> DQ[DuckDB / Athena]
+```
+
+- **Ingesta en dos pasos desacoplados por una cola.** `descubrir` busca
+  las partidas recientes de los jugadores revisados hace mas tiempo y las
+  encola; cada `worker` descarga lo pendiente de su region. Si un proceso
+  muere, nada se pierde: la cola esta en disco.
+- **Un worker por region de ruteo.** El rate limit de Match-V5 se cuenta
+  por region (americas, europe, asia, sea), asi que 4 workers en paralelo
+  no compiten entre si.
+- **SQLite es la fuente de verdad.** Quien escribe en raw registra la key
+  exacta; el transform sale de ahi y nunca lista el bucket.
+- **Batch, no streaming.** Riot entrega ~0.8 partidas/s por region y los
+  analisis (winrates por parche) no necesitan tiempo real. Un stream
+  (Kafka/Kinesis) agregaria costo y piezas sin beneficio; la cola cumple
+  el papel de desacoplar productor y consumidor.
+
+## Como correrlo
+
+Requisitos: Linux, Docker, conda, una API key de Riot.
+
+```bash
+# 1. Servidor: Docker, Miniconda y plantilla de ~/riftcat-env.sh
+bash bash_script/config/setup_server.sh
+nano ~/riftcat-env.sh            # RIOT_API_KEY y credenciales de MinIO
+
+# 2. MinIO local con los buckets riftcat-raw y riftcat-curated
+bash bash_script/config/levantar_minio.sh
+
+# 3. Entorno de Python
+bash bash_script/config/crear_entorno_python.sh
+conda activate riftcat
+source ~/riftcat-env.sh
+```
+
+Uso:
+
+```bash
+python -m core.poller muestrear                # sembrar jugadores desde League-V4
+python -m core.poller ciclo                    # descubrir + workers por region + rangos
+python -m core.poller worker --region sea      # solo una region
+python -m core.transform                       # raw -> curated (solo lo nuevo)
+python -m core.query                           # top 20 campeones con winrate
+python -m core.mantenimiento reconciliar       # SQLite vs raw
+python -m pytest tests/                        # tests
+```
+
+`run_poller.sh` corre un ciclo y sirve para cron. Codigos de salida del
+poller: 0 ok, 1 key invalida, 2 Riot caido (lo pendiente queda en cola).
+
+## Local vs AWS
+
+| Pieza | Local (hoy) | AWS (V1) |
+|---|---|---|
+| Data lake raw y curated | MinIO | S3 |
+| Estado (cola, vistos, transformados) | SQLite | DynamoDB |
+| Cola de descarga | tabla `match_queue` | SQS |
+| Disparo de la ingesta | cron + `run_poller.sh` | EventBridge + Lambda |
+| Deteccion de archivos nuevos | `matches_vistos.s3_key` | S3 Event Notifications a SQS |
+| Formato de curated | un parquet | Iceberg (Glue Data Catalog) |
+| Consultas | DuckDB | Athena |
+| Infraestructura | scripts bash | Terraform |
+
+El codigo usa boto3 con `AWS_ENDPOINT_URL_S3`: para pasar de MinIO a S3
+basta quitar esa variable y usar credenciales de AWS.
+
+## Estructura
+
+```
+core/
+  riot_client.py    cliente de la API: timeout, reintentos, errores tipados
+  poller.py         ingesta (CLI): muestrear, descubrir, worker, rangos, ciclo
+  db.py             estado en SQLite: cola, vistos, transformados, puuids
+  parquet_writer.py escritura a raw con particion platform/dt/hash
+  transform.py      raw -> curated, incremental por lotes
+  mantenimiento.py  rellenar-keys y reconciliar
+  query.py          consulta de ejemplo
+tests/              pytest
+bash_script/        setup del servidor, ciclo de ingesta, reset
+```
+
+## Registro de decisiones
+
+Notas escritas conforme se tomaron las decisiones, con el problema real
+que las motivo.
+
 **NOTA: por que el particionado por hash, aunque se vea "vacio" ahorita**
 Con pocas partidas, el hash de 2 digitos (256 combinaciones posibles)
 genera casi una carpeta por archivo, lo cual se ve raro navegando MinIO

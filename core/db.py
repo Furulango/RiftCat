@@ -194,17 +194,18 @@ def marcar_subido(conn, match_id):
     conn.commit()
 
 
-def marcar_fallo(conn, match_id, error):
-    """Suma un intento. Al llegar a MAX_INTENTOS pasa a 'error' y deja de reintentarse."""
+def marcar_fallo(conn, match_id, error, definitivo=False):
+    """Suma un intento. Al llegar a MAX_INTENTOS pasa a 'error' y deja de reintentarse.
+    Con definitivo=True pasa a 'error' de una vez (por ejemplo, un 404: la partida no existe)."""
     conn.execute(
         """
         UPDATE match_queue
         SET intentos = intentos + 1,
             ultimo_error = ?,
-            estado = CASE WHEN intentos + 1 >= ? THEN ? ELSE ? END
+            estado = CASE WHEN ? OR intentos + 1 >= ? THEN ? ELSE ? END
         WHERE match_id = ?
         """,
-        (str(error)[:200], MAX_INTENTOS, ERROR, PENDIENTE, match_id),
+        (str(error)[:200], definitivo, MAX_INTENTOS, ERROR, PENDIENTE, match_id),
     )
     conn.commit()
 

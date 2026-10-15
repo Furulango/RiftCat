@@ -1,10 +1,6 @@
-# bash_script/muestrear_ligas.sh
-python -c "
-from core.db import get_conn
-from core.poller import muestrear_ligas
+#!/bin/bash
+# muestrear_ligas.sh
+# Siembra puuids desde League-V4 (Challenger LA1 + Diamante, Esmeralda y Platino en 15 servidores).
+# Uso: ./bash_script/muestrear_ligas.sh
 
-conn = get_conn()
-total = muestrear_ligas(conn)
-print(f'Puuids descubiertos: {total}')
-conn.close()
-"
+python -m core.poller muestrear

@@ -359,11 +359,11 @@ porque la muestra no es proporcional a la poblacion real.
 - [x] `riot_client`: timeout, reintentos para 429/5xx, errores tipados
 - [x] Rangos pendientes ya no se atoran (UNRANKED, orden por antiguedad)
 - [x] Tests de `riot_client` y de rangos
-- [ ] Datos cerrados: sea terminado, transform final, curated = matches_vistos
+- [x] Datos cerrados: transform final, curated = matches_vistos (6,064 de sea quedan en cola)
 - [x] `match_queue` en `core/db.py` con funciones y `busy_timeout`
 - [x] `s3_key` en `matches_vistos`: el transform ya no lista raw
 - [x] `core/mantenimiento.py`: rellenar-keys y reconciliar
-- [ ] Poller en dos comandos: `descubrir` (encola) y `worker --region` (consume)
+- [x] Poller en dos comandos: `descubrir` (encola) y `worker --region` (consume), mas `ciclo`
 - [x] Tests de la cola, del estado y del transform
-- [ ] README: que es, como correrlo, diagrama, tabla local <-> AWS
-- [ ] Borrar `worker_region.py` de B
+- [x] README: que es, como correrlo, diagrama, tabla local <-> AWS
+- [x] Borrar `worker_region.py` de B
